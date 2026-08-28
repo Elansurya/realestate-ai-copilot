@@ -1,377 +1,189 @@
-import pytest
 """
-Additions for backend/tests/conftest.py
+Shared pytest fixtures for the Enterprise Real Estate AI Copilot CRM test suite.
 
-Paste everything below the existing imports into your conftest.py
-(or append this whole block to the end of the existing file). Nothing
-here redefines db_session / app / async_client — those keep coming
-from test_booking_api.py exactly as already wired.
-
-Every fixture below is built strictly from the real, uploaded source:
-    - app/models/payment.py            (Payment, PaymentStatus, PaymentMode, PaymentType)
-    - app/schemas/payment.py           (PaymentCreate field names/validators)
-    - app/services/payment_service.py  (what create_payment/status-update validate)
-    - tests/test_booking_api.py        (admin_client, sales_agent_client,
-                                         customer, property_obj, _create_booking_via_api,
-                                         BOOKINGS_PREFIX, create_access_token usage)
-
-No model fields, enum values, or auth mechanisms are invented.
+This module enforces isolated, environment-based test configuration and
+provides reusable fixtures for mocking the database session, external AI
+services, and external email/notification services so that no unit test
+ever touches a production system.
 """
 
-import itertools
-import uuid
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
-from datetime import date
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
+from typing import Generator
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest_asyncio
+import pytest
 
-from app.core.security import create_access_token
-from app.models.payment import Payment, PaymentMode, PaymentStatus, PaymentType
+# ---------------------------------------------------------------------------
+# Path setup
+# ---------------------------------------------------------------------------
+# Ensure the project root (parent of tests/) is importable so `backend.*`
+# modules can be resolved regardless of how pytest is invoked.
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-from tests.test_booking_api import (
-    db_session,
-    app,
-    client as async_client,
-)
+# ---------------------------------------------------------------------------
+# Isolated, environment-based test configuration.
+# These MUST be set before any `backend` module is imported, since backend
+# configuration is typically read from the environment at import time.
+# Using setdefault avoids clobbering any values explicitly provided by CI.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("TESTING", "true")
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-do-not-use-in-prod")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-do-not-use-in-prod")
+os.environ.setdefault("AI_SERVICE_API_KEY", "test-ai-service-key")
+os.environ.setdefault("AI_SERVICE_BASE_URL", "https://mock-ai.local")
+os.environ.setdefault("EMAIL_SERVICE_API_KEY", "test-email-service-key")
+os.environ.setdefault("EMAIL_SERVICE_BASE_URL", "https://mock-email.local")
+os.environ.setdefault("ALLOW_PRODUCTION_DB_WRITES", "false")
 
-from tests.test_booking_api import (
-    BOOKINGS_PREFIX,
-    _create_booking_via_api,
-    _customer_creator,
-    admin_client,
-    admin_user,
-    customer,
-    property_obj,
-    sales_agent_client,
-    sales_agent_user,
-)
-
-
-# --------------------------------------------------------------------------
-# Auth token fixtures
-#
-# test_payment_api.py builds its own Authorization headers via
-# auth_headers(token), unlike test_booking_api.py's admin_client /
-# sales_agent_client (which bake the header into an AsyncClient). So
-# these fixtures return the bare JWT string, minted the same way
-# _bearer_client() in test_booking_api.py already does — same
-# create_access_token call, same subject convention (str(user.id)) —
-# just without wrapping it in a client.
-# --------------------------------------------------------------------------
-@pytest_asyncio.fixture
-async def admin_token(admin_user) -> str:
-    return create_access_token(subject=str(admin_user.id))
+from backend.models import Lead, LeadStatus, Property, PropertyStatus  # noqa: E402
+from backend.repositories import LeadRepository, PropertyRepository  # noqa: E402
+from backend.services import LeadService, PropertyService  # noqa: E402
 
 
-@pytest_asyncio.fixture
-async def sales_agent_token(sales_agent_user) -> str:
-    return create_access_token(subject=str(sales_agent_user.id))
+# ---------------------------------------------------------------------------
+# Event loop (session scoped so async fixtures/tests share one loop)
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
 
-# --------------------------------------------------------------------------
-# Booking helper
-#
-# Payment creation (via the API) requires an existing, active Booking
-# to reference by booking_id — PaymentService._validate_booking() 404s
-# / 400s otherwise. This reuses the exact same helper test_booking_api.py
-# uses for its own booking-creation tests, through admin_client, so no
-# booking-creation logic is duplicated here.
-# --------------------------------------------------------------------------
-@pytest_asyncio.fixture
-async def _active_booking(admin_client, customer, property_obj) -> dict:
-    return await _create_booking_via_api(admin_client, customer.id, property_obj.id)
+# ---------------------------------------------------------------------------
+# Safety guard: fail loudly if a test ever tries to reach a real DATABASE_URL
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _guard_against_production_database() -> None:
+    db_url = os.environ.get("DATABASE_URL", "")
+    if "memory" not in db_url and "test" not in db_url:
+        pytest.fail(
+            "Refusing to run unit tests against a non-test DATABASE_URL. "
+            "Set DATABASE_URL to an in-memory or test-only database."
+        )
 
 
-@pytest_asyncio.fixture
-async def booking_fixture(admin_client, customer, property_obj):
-    """Create a real booking row for repository/service tests."""
-    data = await _create_booking_via_api(admin_client, customer.id, property_obj.id)
-    booking_id = data["id"]
-    # The API helper returns JSON; repository tests need an object exposing .id.
-    return SimpleNamespace(id=uuid.UUID(str(booking_id)))
-
-
-@pytest_asyncio.fixture
-async def async_session(db_session):
-    """Backward-compatible alias for repository suites using async_session."""
-    return db_session
-
-
-@pytest_asyncio.fixture
-async def customer_fixture(customer):
-    return customer
-
-
-@pytest_asyncio.fixture
-async def property_fixture(property_obj):
-    return property_obj
-
-
-@pytest_asyncio.fixture
-async def user_fixture(admin_user):
-    return admin_user
-
-
-# --------------------------------------------------------------------------
-# Payload fixtures (dicts posted as JSON to POST /api/v1/payments)
-#
-# Field set matches PaymentCreate exactly (app/schemas/payment.py):
-# booking_id, customer_id, property_id, received_by(optional),
-# payment_date, payment_amount, payment_mode, transaction_reference
-# (optional), payment_type, bank_name(optional), cheque_number
-# (optional), remarks(optional), payment_status(optional, default
-# PENDING), receipt_number(optional). payment_mode="UPI" and
-# payment_type="TOKEN" are real PaymentMode/PaymentType members.
-# --------------------------------------------------------------------------
-_TXN_REF_COUNTER = itertools.count(1)
-
-
-def _unique_txn_reference() -> str:
-    return f"TESTTXN{next(_TXN_REF_COUNTER):08d}"
-
-
-@pytest_asyncio.fixture
-async def payment_payload(_active_booking, customer, property_obj) -> dict:
-    return {
-        "booking_id": _active_booking["id"],
-        "customer_id": str(customer.id),
-        "property_id": property_obj.id,
-        "payment_date": date.today().isoformat(),
-        "payment_amount": 100000,
-        "payment_mode": PaymentMode.UPI.value,
-        "transaction_reference": _unique_txn_reference(),
-        "payment_type": PaymentType.TOKEN.value,
-        "remarks": "Test payment via fixture",
-    }
-
-
-@pytest_asyncio.fixture
-async def inactive_booking_payload(admin_client, customer, property_obj) -> dict:
-    """
-    A payload referencing a booking that has been soft-deleted (is_active
-    is False), for the 400 "inactive booking" case in
-    PaymentService._validate_booking().
-    """
-    booking = await _create_booking_via_api(admin_client, customer.id, property_obj.id)
-    resp = await admin_client.delete(f"{BOOKINGS_PREFIX}/{booking['id']}")
-    assert resp.status_code == 200, resp.text
-
-    return {
-        "booking_id": booking["id"],
-        "customer_id": str(customer.id),
-        "property_id": property_obj.id,
-        "payment_date": date.today().isoformat(),
-        "payment_amount": 50000,
-        "payment_mode": PaymentMode.UPI.value,
-        "transaction_reference": _unique_txn_reference(),
-        "payment_type": PaymentType.TOKEN.value,
-        "remarks": "Payment attempted against an inactive booking",
-    }
-
-
-@pytest_asyncio.fixture
-async def success_payment_payload(_active_booking, customer, property_obj) -> dict:
-    """
-    payment_status is explicitly SUCCESS: PaymentService only enforces
-    transaction_reference uniqueness when payment_status == SUCCESS
-    (see _validate_transaction_reference_uniqueness), so the duplicate-
-    reference 409 test needs this, not the PENDING default.
-    """
-    return {
-        "booking_id": _active_booking["id"],
-        "customer_id": str(customer.id),
-        "property_id": property_obj.id,
-        "payment_date": date.today().isoformat(),
-        "payment_amount": 100000,
-        "payment_mode": PaymentMode.UPI.value,
-        "transaction_reference": _unique_txn_reference(),
-        "payment_type": PaymentType.TOKEN.value,
-        "payment_status": PaymentStatus.SUCCESS.value,
-        "remarks": "Test success payment via fixture",
-    }
-
-
-# --------------------------------------------------------------------------
-# Direct-DB Payment row fixtures (for tests that need an existing
-# payment_id, not a fresh POST)
-#
-# Inserted directly through db_session/Payment(...) rather than through
-# PaymentService.create_payment(), because the service path (see the
-# module docstring above) currently raises AttributeError on
-# booking.total_amount / booking.paid_amount, which don't exist on the
-# real Booking model. Bypassing the service for row setup keeps these
-# fixtures usable regardless of that separate service-layer issue, and
-# only sets columns that genuinely exist on Payment (app/models/payment.py).
-# --------------------------------------------------------------------------
-_PAYMENT_NUMBER_COUNTER = itertools.count(1)
-
-
-def _unique_test_payment_number() -> str:
-    return f"PAY-TEST-{next(_PAYMENT_NUMBER_COUNTER):06d}"
-
-
-async def _make_payment(
-    db_session,
-    booking_id: uuid.UUID,
-    customer_id: uuid.UUID,
-    property_id: int,
-    payment_status: PaymentStatus,
-    payment_amount: Decimal = Decimal("100000"),
-    payment_type: PaymentType = PaymentType.TOKEN,
-    payment_mode: PaymentMode = PaymentMode.UPI,
-    transaction_reference: str | None = None,
-) -> Payment:
-    payment = Payment(
-        payment_number=_unique_test_payment_number(),
-        booking_id=booking_id,
-        customer_id=customer_id,
-        property_id=property_id,
-        payment_amount=payment_amount,
-        payment_mode=payment_mode,
-        payment_type=payment_type,
-        payment_status=payment_status,
-        transaction_reference=transaction_reference,
-    )
-    db_session.add(payment)
-    await db_session.commit()
-    await db_session.refresh(payment)
-    return payment
-
-
-@pytest_asyncio.fixture
-async def payment_id_fixture(db_session, _active_booking, customer, property_obj) -> str:
-    """Any existing, active payment — used by the 403 authorization tests."""
-    payment = await _make_payment(
-        db_session,
-        uuid.UUID(_active_booking["id"]),
-        customer.id,
-        property_obj.id,
-        PaymentStatus.PENDING,
-    )
-    return str(payment.id)
-
-
-@pytest_asyncio.fixture
-async def pending_payment_id(db_session, _active_booking, customer, property_obj) -> str:
-    payment = await _make_payment(
-        db_session,
-        uuid.UUID(_active_booking["id"]),
-        customer.id,
-        property_obj.id,
-        PaymentStatus.PENDING,
-    )
-    return str(payment.id)
-
-
-@pytest_asyncio.fixture
-async def success_payment_id(db_session, _active_booking, customer, property_obj) -> str:
-    payment = await _make_payment(
-        db_session,
-        uuid.UUID(_active_booking["id"]),
-        customer.id,
-        property_obj.id,
-        PaymentStatus.SUCCESS,
-    )
-    return str(payment.id)
-
-
-@pytest_asyncio.fixture
-async def failed_payment_id(db_session, _active_booking, customer, property_obj) -> str:
-    payment = await _make_payment(
-        db_session,
-        uuid.UUID(_active_booking["id"]),
-        customer.id,
-        property_obj.id,
-        PaymentStatus.FAILED,
-    )
-    return str(payment.id)
-# --------------------------------------------------------------------------
-# Shared unit-test fixtures
-# --------------------------------------------------------------------------
-# Several service suites exercise orchestration with the repository fully
-# mocked.  They require a session-shaped object but must not touch a real
-# database.  Keep this fixture here so every service test gets the same
-# lightweight async-session double.
+# ---------------------------------------------------------------------------
+# Mock infrastructure fixtures
+# ---------------------------------------------------------------------------
 @pytest.fixture
-def mocker(monkeypatch):
-    class _Patch:
-        def object(self, target, attribute, new=None, **kwargs):
-            if new is None:
-                factory = kwargs.pop("new_callable", None)
-                new = factory(**kwargs) if factory is not None else MagicMock(**kwargs)
-            monkeypatch.setattr(target, attribute, new)
-            return new
-    class _Mocker:
-        AsyncMock = AsyncMock
-        MagicMock = MagicMock
-        Mock = MagicMock
-        patch = _Patch()
-    return _Mocker()
-
-@pytest.fixture
-def db_session_mock():
-    from unittest.mock import AsyncMock, MagicMock
-
-    session = MagicMock(name="db_session_mock")
+def mock_db_session() -> AsyncMock:
+    """A fully mocked async DB session; no real database is ever touched."""
+    session = AsyncMock()
+    session.add = MagicMock()
+    session.delete = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
-    session.flush = AsyncMock()
     session.refresh = AsyncMock()
+    session.get = AsyncMock(return_value=None)
     session.execute = AsyncMock()
-    session.add = MagicMock()
-    session.add_all = MagicMock()
+    session.close = AsyncMock()
     return session
 
 
-
-@pytest_asyncio.fixture
-async def create_user_id(db_session):
-    from app.models.user import User, UserRole
-    async def _create_user_id(**overrides):
-        data = {
-            "uuid": str(uuid.uuid4()),
-            "full_name": "Repository Test User",
-            "email": f"repo_user_{uuid.uuid4().hex[:12]}@example.com",
-            "phone": f"+1555{uuid.uuid4().int % 10_000_000:07d}",
-            "password_hash": "not-a-real-hash",
-            "role": UserRole.ADMIN,
-            "is_active": True,
-            "is_verified": True,
-        }
-        data.update(overrides)
-        user = User(**data)
-        db_session.add(user)
-        await db_session.flush()
-        return user.id
-    return _create_user_id
+@pytest.fixture
+def mock_ai_service() -> AsyncMock:
+    """Mock for the external AI copilot/recommendation service."""
+    service = AsyncMock()
+    service.score_lead = AsyncMock(return_value=78)
+    service.recommend_properties = AsyncMock(return_value=[])
+    service.generate_summary = AsyncMock(return_value="AI generated summary")
+    return service
 
 
-@pytest_asyncio.fixture
-async def seed_users(db_session):
-    """Create the four users required by workflow repository tests."""
-    from app.models.user import User, UserRole
+@pytest.fixture
+def mock_email_service() -> AsyncMock:
+    """Mock for the external transactional email/notification service."""
+    service = AsyncMock()
+    service.send_email = AsyncMock(return_value=True)
+    service.send_welcome_email = AsyncMock(return_value=True)
+    return service
 
-    users = {}
-    specs = {
-        "initiator": (UserRole.ADMIN, "workflow_initiator"),
-        "assignee": (UserRole.SALES_MANAGER, "workflow_assignee"),
-        "approver": (UserRole.SALES_MANAGER, "workflow_approver"),
-        "escalation_target": (UserRole.ADMIN, "workflow_escalation"),
+
+# ---------------------------------------------------------------------------
+# Sample data fixtures
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def sample_lead_data() -> dict:
+    return {
+        "id": "lead-1001",
+        "name": "Alex Rivera",
+        "email": "alex.rivera@example.com",
+        "phone": "+14155552671",
+        "status": LeadStatus.NEW,
+        "score": 0,
+        "source": "website",
+        "created_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
     }
-    for key, (role, label) in specs.items():
-        user = User(
-            uuid=str(uuid.uuid4()),
-            full_name=label.replace("_", " ").title(),
-            email=f"{label}_{uuid.uuid4().hex[:10]}@example.com",
-            phone=f"+1555{uuid.uuid4().int % 10_000_000:07d}",
-            password_hash="not-a-real-hash",
-            role=role,
-            is_active=True,
-        )
-        db_session.add(user)
-        await db_session.flush()
-        users[key] = user.id
-    await db_session.commit()
-    return users
+
+
+@pytest.fixture
+def sample_property_data() -> dict:
+    return {
+        "id": "prop-2001",
+        "address": "500 Market Street, San Francisco, CA",
+        "price": Decimal("1250000.00"),
+        "bedrooms": 3,
+        "bathrooms": 2,
+        "square_feet": 1800,
+        "status": PropertyStatus.ACTIVE,
+        "listing_date": datetime(2025, 1, 1, tzinfo=timezone.utc),
+    }
+
+
+@pytest.fixture
+def sample_lead(sample_lead_data: dict) -> Lead:
+    return Lead(**sample_lead_data)
+
+
+@pytest.fixture
+def sample_property(sample_property_data: dict) -> Property:
+    return Property(**sample_property_data)
+
+
+# ---------------------------------------------------------------------------
+# Repository fixtures (backed entirely by mock_db_session)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def lead_repository(mock_db_session: AsyncMock) -> LeadRepository:
+    return LeadRepository(session=mock_db_session)
+
+
+@pytest.fixture
+def property_repository(mock_db_session: AsyncMock) -> PropertyRepository:
+    return PropertyRepository(session=mock_db_session)
+
+
+# ---------------------------------------------------------------------------
+# Service fixtures (backed by repositories + mocked external services)
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def lead_service(
+    lead_repository: LeadRepository,
+    mock_ai_service: AsyncMock,
+    mock_email_service: AsyncMock,
+) -> LeadService:
+    return LeadService(
+        repository=lead_repository,
+        ai_service=mock_ai_service,
+        email_service=mock_email_service,
+    )
+
+
+@pytest.fixture
+def property_service(
+    property_repository: PropertyRepository,
+    mock_ai_service: AsyncMock,
+) -> PropertyService:
+    return PropertyService(repository=property_repository, ai_service=mock_ai_service)
