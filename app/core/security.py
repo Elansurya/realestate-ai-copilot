@@ -8,14 +8,35 @@ Responsibilities:
     - JWT access & refresh token creation
     - JWT decoding & validation
 
+    Bearer-token authentication and role-based access control are
+    intentionally NOT implemented in this module. The canonical
+    implementations are:
+        - Authentication: `app.api.dependencies.auth_dependency.get_current_user`
+        - Authorization:  `app.api.dependencies.rbac.require_roles`
+    Both consume `decode_token`/`TokenType` from this module. Keeping a
+    second copy of that logic here previously caused RBAC checks to
+    pass or fail inconsistently across routers; see the note near the
+    bottom of this file.
+
+    A number of call sites/tests import `get_current_user` directly
+    from `app.core.security` instead of from its canonical location.
+    Rather than re-implementing (or eagerly re-importing) it here --
+    which would either duplicate the logic this file's docstring
+    explicitly warns against, or create a circular import (see the
+    `__getattr__` note below) -- this module exposes it lazily as a
+    backward-compatible alias of the one true implementation.
+
 Design Notes:
-    - This module is intentionally decoupled from any ORM model, schema,
-      or API route. It exposes pure, reusable functions consumed by the
-      authentication/authorization layer (services, dependencies, routers)
-      built in later phases.
+    - The hashing and JWT primitives remain pure, ORM/route-decoupled
+      functions consumed by the authentication/authorization layer
+      (services, dependencies, routers).
     - All configuration (secrets, algorithm, expiry durations) is sourced
       from `app.core.config.settings`, ensuring a single source of truth
       and environment-driven configuration (12-factor app compliance).
+    - `settings.SECRET_KEY` is a `pydantic.SecretStr` (to prevent
+      accidental leakage via logging/repr/tracebacks). It must be
+      unwrapped via `.get_secret_value()` at the point of use with
+      `python-jose`, since `jose` expects a plain `str`.
 """
 
 from __future__ import annotations
@@ -24,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from jose import JWTError, jwt
+from jose import jwt
 from passlib.context import CryptContext
 
 from app.core.config import settings
@@ -170,7 +191,7 @@ def _create_token(
 
     return jwt.encode(
         payload,
-        settings.SECRET_KEY,
+        settings.SECRET_KEY.get_secret_value(),
         algorithm=settings.JWT_ALGORITHM,
     )
 
@@ -260,7 +281,7 @@ def decode_token(
     """
     payload = jwt.decode(
         token,
-        settings.SECRET_KEY,
+        settings.SECRET_KEY.get_secret_value(),
         algorithms=[settings.JWT_ALGORITHM],
     )
 
@@ -275,6 +296,48 @@ def decode_token(
     return payload
 
 
+# --------------------------------------------------------------------------
+# NOTE: Authentication (`get_current_user`) and authorization
+# (`require_roles`) intentionally do NOT live in this module.
+#
+# This project has a single canonical implementation of each:
+#   - Authentication: `app.api.dependencies.auth_dependency.get_current_user`
+#   - Authorization:  `app.api.dependencies.rbac.require_roles`
+#   - Role enum:      `app.models.user.UserRole`
+#
+# A second, independently-maintained copy of both used to live here,
+# expecting lowercase role strings ("admin", "manager", ...) instead of
+# `UserRole` enum members. That drift was the root cause of RBAC checks
+# passing for some routers and failing for others. It has been removed;
+# every router must depend on the two functions above.
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Backward-Compatible Lazy Re-Export: get_current_user
+# --------------------------------------------------------------------------
+# Some existing call sites / tests do `from app.core.security import
+# get_current_user` instead of importing it from its canonical location
+# (`app.api.dependencies.auth_dependency`). That canonical module itself
+# imports `decode_token` / `TokenType` from *this* module, so adding a
+# normal, eager `from app.api.dependencies.auth_dependency import
+# get_current_user` at the top of this file would create a circular
+# import (security -> auth_dependency -> security).
+#
+# PEP 562 module-level `__getattr__` lets us resolve `get_current_user`
+# on first access instead, deferring the import until after both modules
+# have finished loading. This preserves a single canonical
+# implementation (no duplicated auth logic) while keeping the
+# backward-compatible import path working.
+# --------------------------------------------------------------------------
+def __getattr__(name: str) -> Any:
+    if name == "get_current_user":
+        from app.api.dependencies.auth_dependency import get_current_user
+
+        return get_current_user
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "TokenType",
     "hash_password",
@@ -283,4 +346,6 @@ __all__ = [
     "create_access_token",
     "create_refresh_token",
     "decode_token",
+    # Lazily resolved backward-compat alias; see __getattr__ above.
+    "get_current_user",
 ]

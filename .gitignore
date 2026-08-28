@@ -1,32 +1,32 @@
-# Virtual Environment
 venv/
 .venv/
-
-# Environment Variables
-.env
-
-# Python Cache
 __pycache__/
 *.py[cod]
-*$py.class
-
-# VS Code
-.vscode/
-
-# Pytest
 .pytest_cache/
-
-# Logs
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 *.log
+.env
+.env.*
+!.env.example
 
-# OS Files
-.DS_Store
-Thumbs.db
-
-# Alembic
-alembic/versions/__pycache__/
-
-# Build
-build/
-dist/
-*.egg-info/
+# Local debugging / audit artifacts
+account5_live_audit.py
+debug_ai_schema.py
+debug_conversations_db.py
+diff_notifications_schema.py
+find_true_head.py
+smoke_analytics_ai.py
+smoke_embedding.py
+smoke_lead.py
+step2_live_audit.py
+step3_live_audit.py
+step3_live_audit.sql
+test_backend.ps1
+test_fixtures.txt
+openapi.json
+storage/
+alembic/versions_backup/

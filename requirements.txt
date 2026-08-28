@@ -28,6 +28,13 @@ alembic==1.13.3
 # PostgreSQL Driver (Recommended)
 psycopg[binary]==3.2.1
 
+# Async PostgreSQL driver (required by DATABASE_URL's postgresql+asyncpg:// scheme)
+asyncpg==0.29.0
+
+# pgvector support for the `embeddings.embedding_vector` column
+# (app/models/embedding.py imports pgvector.sqlalchemy.Vector)
+pgvector==0.5.0
+
 # ---------------------------------------------------------------------
 # Authentication & Security
 # ---------------------------------------------------------------------
@@ -35,6 +42,7 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.0
 python-multipart==0.0.9
+Pillow==11.0.0
 
 # ---------------------------------------------------------------------
 # HTTP & Async

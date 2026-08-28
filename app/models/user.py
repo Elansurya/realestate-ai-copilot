@@ -5,10 +5,15 @@ SQLAlchemy 2.x ORM model representing an application user (staff member)
 within the Real Estate AI Copilot CRM.
 
 Design Notes:
-    - This model intentionally excludes relationships (e.g., to leads,
-      properties, deals) to keep Phase 03 scoped strictly to
-      Authentication & Authorization. Relationships will be introduced
-      in later phases once dependent models exist.
+    - `assigned_properties` is the inverse side of `Property.assigned_agent`
+      (a one-to-many: one User manages many Property rows). It is declared
+      here as the mandatory mirror of that relationship's `back_populates`
+      contract — SQLAlchemy raises `InvalidRequestError` at mapper
+      configuration time if a `back_populates` target is missing on the
+      other model, which is why this attribute must exist even though
+      `User` otherwise stays scoped to auth concerns. `Property` is
+      imported only under `TYPE_CHECKING` to avoid a runtime circular
+      import (`property.py` depends on `user.py` already being loadable).
     - `role` uses a native Python Enum mapped to a Postgres ENUM type for
       strong data integrity at the database level (invalid role strings
       cannot be inserted, even via raw SQL).
@@ -22,7 +27,9 @@ Design Notes:
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING, List
 
 from sqlalchemy import (
     Boolean,
@@ -32,9 +39,13 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.audit_log import AuditLog
+    from app.models.property import Property
 
 
 # --------------------------------------------------------------------------
@@ -90,6 +101,7 @@ class User(Base):
         unique=True,
         nullable=False,
         index=True,
+        default=lambda: str(uuid.uuid4()),
         doc=(
             "Globally unique, non-sequential public identifier exposed "
             "via API responses in place of the internal `id`, preventing "
@@ -191,6 +203,59 @@ class User(Base):
         server_default=func.now(),
         onupdate=func.now(),
         doc="UTC timestamp when the user record was last updated.",
+    )
+
+    # ----------------------------------------------------------------
+    # Relationships
+    # ----------------------------------------------------------------
+    assigned_properties: Mapped[List["Property"]] = relationship(
+        "Property",
+        back_populates="assigned_agent",
+        foreign_keys="[Property.assigned_agent_id]",
+        lazy="raise_on_sql",
+        passive_deletes=True,
+        doc=(
+            "All Property listings currently assigned to this User as "
+            "agent. Mirrors `Property.assigned_agent`; required because "
+            "that relationship declares `back_populates="
+            "'assigned_properties'`.\n\n"
+            "`lazy='raise_on_sql'` is deliberate, not an oversight: "
+            "`User` is loaded on essentially every authenticated request "
+            "via `get_current_user()` -> `UserRepository.get_by_id()`, "
+            "none of which ever touch this collection today. Defaulting "
+            "it to eager (`selectin`) would silently add an extra query "
+            "— potentially returning a large row set — to every single "
+            "authenticated API call. `raise_on_sql` makes that path "
+            "cheap by default and forces any future caller that actually "
+            "needs a user's assigned properties to request it explicitly "
+            "(e.g. `select(User).options(selectinload(User."
+            "assigned_properties))`), which also surfaces as a clear, "
+            "immediate error instead of a silent implicit query or an "
+            "async `MissingGreenlet` failure if triggered outside a live "
+            "session context.\n\n"
+            "`passive_deletes=True` is required as a consequence: "
+            "`Property.assigned_agent_id` already declares "
+            "`ondelete='SET NULL'` at the FK level, so on `User` deletion "
+            "(see `UserRepository.delete()`, which uses `AsyncSession."
+            "delete()`) this tells the ORM to trust Postgres to null out "
+            "child rows via that constraint, rather than trying to load "
+            "this collection into memory to manage it row-by-row — which "
+            "would otherwise conflict with `lazy='raise_on_sql'` and "
+            "raise on the very delete path that must always succeed."
+        ),
+    )
+
+    audit_logs: Mapped[List["AuditLog"]] = relationship(
+        "AuditLog",
+        back_populates="user",
+        foreign_keys="[AuditLog.user_id]",
+        lazy="raise_on_sql",
+        doc=(
+            "All AuditLog entries recorded against this User. "
+            "Mirrors `AuditLog.user`; required because that relationship "
+            "declares `back_populates='audit_logs'`. `lazy='raise_on_sql'` "
+            "for the same reasons as `assigned_properties` above."
+        ),
     )
 
     # ----------------------------------------------------------------

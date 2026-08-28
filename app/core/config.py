@@ -13,12 +13,12 @@ Usage:
     settings.DATABASE_URL
 """
 
+import logging
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Literal, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing_extensions import Annotated
 
 
 class Settings(BaseSettings):
@@ -31,15 +31,20 @@ class Settings(BaseSettings):
     in `model_config`.
     """
 
+class Settings(BaseSettings):
+
     # ------------------------------------------------------------------
     # General application metadata
     # ------------------------------------------------------------------
     PROJECT_NAME: str = "Enterprise Real Estate AI Copilot CRM"
+    VERSION: str = "1.0.0"
     API_V1_PREFIX: str = "/api/v1"
-    ENVIRONMENT: str = Field(
+
+    ENVIRONMENT: Literal["development", "staging", "production", "testing"] = Field(
         default="development",
         description="One of: development, staging, production, testing",
     )
+
     DEBUG: bool = False
 
     # ------------------------------------------------------------------
@@ -47,13 +52,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-
     # ------------------------------------------------------------------
     # Security / JWT (values used starting Phase 02+ auth implementation,
     # declared here now so config is centralized from day one)
     # ------------------------------------------------------------------
-    SECRET_KEY: str = Field(
-        default="CHANGE_ME_IN_PRODUCTION",
+    SECRET_KEY: SecretStr = Field(
+        default=SecretStr("CHANGE_ME_IN_PRODUCTION"),
         description="Secret key used to sign JWT access/refresh tokens.",
     )
     JWT_ALGORITHM: str = "HS256"
@@ -64,7 +68,7 @@ class Settings(BaseSettings):
     # Database (PostgreSQL)
     # ------------------------------------------------------------------
     POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
+    POSTGRES_PASSWORD: SecretStr = SecretStr("postgres")
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "real_estate_crm"
@@ -72,6 +76,12 @@ class Settings(BaseSettings):
     # Fully assembled SQLAlchemy database URL. Built automatically
     # from the discrete POSTGRES_* fields above if not explicitly set.
     DATABASE_URL: Optional[str] = None
+
+    # Optional override for the isolated database used by the test
+    # suite (e.g. tests/test_settings_api.py). When unset, tests fall
+    # back to deriving a DSN from the POSTGRES_* fields above, so this
+    # is only needed if the test DB lives on a different host/user.
+    TEST_DATABASE_URL: Optional[str] = None
 
     # Toggle SQL statement echoing for local debugging only.
     DB_ECHO: bool = False
@@ -85,23 +95,22 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # CORS
     # ------------------------------------------------------------------
-    # `NoDecode` tells pydantic-settings NOT to attempt its default
-    # JSON decoding for this list field, so we can accept a plain
-    # comma-separated string from the environment (e.g.
-    # "http://localhost:3000,http://x.com") and split it ourselves
-    # in the validator below.
-    BACKEND_CORS_ORIGINS: List[str] = []
+    # Accepts a plain comma-separated string from the environment
+    # (e.g. "http://localhost:3000,http://x.com") and splits it
+    # ourselves in the validator below. Native list values (e.g.
+    # defaults or values set programmatically in tests) pass through.
+    # NOTE: kept as a plain `str` (not `List[str]`) because pydantic-settings
+    # attempts a JSON-decode of any complex-typed field read from the
+    # environment/.env *before* field validators run, which breaks on the
+    # plain comma-separated format documented in .env.example.txt (e.g.
+    # "http://localhost:3000,http://localhost:5173"). Use the
+    # `cors_origins` property below to get the parsed list.
+    BACKEND_CORS_ORIGINS: str = ""
 
-    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
-    @classmethod
-    def assemble_cors_origins(cls, v):
-        """Splits a comma-separated CORS origins string from the
-        environment into a list. Native list values (e.g. defaults
-        or values set programmatically in tests) pass through as-is.
-        """
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    @property
+    def cors_origins(self) -> List[str]:
+        """Parsed list of allowed CORS origins from BACKEND_CORS_ORIGINS."""
+        return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(",") if origin.strip()]
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -115,6 +124,11 @@ class Settings(BaseSettings):
         data = info.data
         user = data.get("POSTGRES_USER")
         password = data.get("POSTGRES_PASSWORD")
+        password = (
+            password.get_secret_value()
+            if isinstance(password, SecretStr)
+            else password
+        )
         server = data.get("POSTGRES_SERVER")
         port = data.get("POSTGRES_PORT")
         db = data.get("POSTGRES_DB")
@@ -122,9 +136,80 @@ class Settings(BaseSettings):
         return f"postgresql+psycopg://{user}:{password}@{server}:{port}/{db}"
 
     # ------------------------------------------------------------------
+    # AI Copilot / Embeddings
+    # ------------------------------------------------------------------
+    ANTHROPIC_API_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description="API key for the Anthropic provider used by AIProviderClient.",
+    )
+    AI_REQUEST_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        description="Timeout, in seconds, for outbound AI/embedding provider HTTP calls.",
+    )
+    AI_DOCUMENT_STORAGE_PATH: str = Field(
+        default="./storage/knowledge_documents",
+        description="Local filesystem directory where uploaded knowledge documents are stored.",
+    )
+
+    EMBEDDING_API_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description="API key for the embedding provider used by EmbeddingService.",
+    )
+    EMBEDDING_API_BASE_URL: str = Field(
+        default="https://api.openai.com/v1",
+        description="Base URL of the embedding provider's API.",
+    )
+    EMBEDDING_MODEL: str = Field(
+        default="text-embedding-3-small",
+        description="Name of the embedding model to request from the provider.",
+    )
+    EMBEDDING_DIMENSIONS: int = Field(
+        default=1536,
+        gt=0,
+        description="Dimensionality of generated embedding vectors. Must match the "
+        "pgvector column dimension configured on the `embeddings` table.",
+    )
+
+    # ------------------------------------------------------------------
     # Logging
     # ------------------------------------------------------------------
     LOG_LEVEL: str = "INFO"
+
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        """Fail fast at startup if LOG_LEVEL is not a recognized
+        Python logging level, rather than failing later on first
+        log call.
+        """
+        v = v.upper()
+        valid_levels = logging._nameToLevel.keys()  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+        if v not in valid_levels:
+            raise ValueError(
+                f"LOG_LEVEL must be one of {sorted(valid_levels)}, got {v!r}"
+            )
+        return v
+
+    # ------------------------------------------------------------------
+    # Cross-field production safety checks
+    # ------------------------------------------------------------------
+    @model_validator(mode="after")
+    def enforce_production_safety(self) -> "Settings":
+        """Fail fast at startup rather than silently running an
+        insecure configuration in production.
+        """
+        if self.ENVIRONMENT == "production":
+            if self.SECRET_KEY.get_secret_value() == "CHANGE_ME_IN_PRODUCTION":
+                raise ValueError(
+                    "SECRET_KEY must be overridden via environment/.env in production."
+                )
+            if self.DEBUG:
+                raise ValueError("DEBUG must be False in production.")
+            if not self.cors_origins or "*" in self.cors_origins:
+                raise ValueError(
+                    "BACKEND_CORS_ORIGINS must be an explicit, non-wildcard list in production."
+                )
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -21,26 +21,35 @@ Design Notes:
       `delete`) commit and refresh the session so callers immediately
       receive a fully up-to-date ORM instance (with server-generated
       defaults such as `id`, `created_at`, etc. populated).
-
-Temporary Debugging Note:
-    - `create()` currently wraps its database operations in a
-      try/except block that prints the exception type, message, and
-      full traceback to the terminal before re-raising. This is a
-      TEMPORARY diagnostic measure to surface the root cause of a 500
-      error on user registration and should be removed once the
-      underlying issue is identified and fixed.
+    - `list_users()` and `count_users()` (Milestone 4: User Management
+      Module) share a single private filter-building helper
+      (`_apply_filters`) so that "how many users match X" and "which
+      users match X" can never silently drift apart as filters evolve.
+      `list_users()`'s original `skip`/`limit` positional signature is
+      preserved unchanged; the new `role`, `is_active`, and `search`
+      filters are added as keyword-only parameters with `None` defaults,
+      so every existing call site remains valid without modification.
+    - `create()` rolls back and re-raises on any write failure (e.g. a
+      unique-constraint violation surfaced as `IntegrityError`), logging
+      the exception via the standard `logging` module rather than
+      `print`/`traceback.print_exc()` so failures are captured by the
+      application's configured log handlers/aggregators instead of only
+      appearing on stdout.
 """
 
 from __future__ import annotations
 
-import traceback
+import logging
 from typing import Optional, Sequence
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from app.models.user import User, UserRole
+
+logger = logging.getLogger(__name__)
 
 
 class UserRepository:
@@ -119,20 +128,128 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_users(self, skip: int = 0, limit: int = 100) -> Sequence[User]:
+    async def list_users(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        *,
+        role: Optional[UserRole] = None,
+        is_active: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> Sequence[User]:
         """
-        Retrieve a paginated list of users, ordered by primary key.
+        Retrieve a paginated list of users, ordered by primary key,
+        optionally filtered by role, active status, and/or a free-text
+        search term.
 
         Args:
             skip: Number of records to skip (offset), for pagination.
             limit: Maximum number of records to return.
+            role: If provided, restrict results to users with exactly
+                  this `UserRole`. Omit (`None`) to match any role.
+            is_active: If provided, restrict results to users whose
+                       `is_active` flag equals this value. Omit (`None`)
+                       to match both active and inactive users.
+            search: If provided, restrict results to users whose
+                    `full_name` or `email` contains this substring
+                    (case-insensitive). Omit (`None`) to skip text
+                    filtering.
 
         Returns:
-            A sequence of `User` instances (may be empty).
+            A sequence of `User` instances matching the given filters
+            (may be empty).
+
+        Notes:
+            - `skip` and `limit` remain positional, matching the
+              original signature exactly. `role`, `is_active`, and
+              `search` are keyword-only additions, so all pre-existing
+              call sites continue to work without modification.
         """
-        stmt = select(User).order_by(User.id).offset(skip).limit(limit)
+        stmt: Select = select(User)
+        stmt = self._apply_filters(stmt, role=role, is_active=is_active, search=search)
+        stmt = stmt.order_by(User.id).offset(skip).limit(limit)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def count_users(
+        self,
+        *,
+        role: Optional[UserRole] = None,
+        is_active: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> int:
+        """
+        Count the total number of users matching the given filters,
+        independent of pagination.
+
+        Intended to be called alongside `list_users()` with identical
+        filter arguments, to populate the `total` field of a paginated
+        response envelope (e.g., `PaginatedUserResponse`).
+
+        Args:
+            role: If provided, restrict the count to users with exactly
+                  this `UserRole`. Omit (`None`) to match any role.
+            is_active: If provided, restrict the count to users whose
+                       `is_active` flag equals this value. Omit (`None`)
+                       to match both active and inactive users.
+            search: If provided, restrict the count to users whose
+                    `full_name` or `email` contains this substring
+                    (case-insensitive). Omit (`None`) to skip text
+                    filtering.
+
+        Returns:
+            The total count of matching `User` records as an integer.
+        """
+        stmt = select(func.count()).select_from(User)
+        stmt = self._apply_filters(stmt, role=role, is_active=is_active, search=search)
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    @staticmethod
+    def _apply_filters(
+        stmt: Select,
+        *,
+        role: Optional[UserRole],
+        is_active: Optional[bool],
+        search: Optional[str],
+    ) -> Select:
+        """
+        Apply the shared set of optional `WHERE` filters to a SQLAlchemy
+        `Select` statement targeting the `User` model.
+
+        Centralizing this logic ensures `list_users()` and
+        `count_users()` can never apply inconsistent filter semantics
+        (e.g., one matching case-sensitively and the other not), since
+        both delegate to this single implementation.
+
+        Args:
+            stmt: The base `Select` statement to augment (either a
+                  `select(User)` or a `select(func.count()).select_from(User)`).
+            role: Optional exact-match filter on `User.role`.
+            is_active: Optional exact-match filter on `User.is_active`.
+            search: Optional case-insensitive substring filter matched
+                    against `User.full_name` or `User.email`.
+
+        Returns:
+            The same `Select` statement with the applicable `WHERE`
+            clauses appended.
+        """
+        if role is not None:
+            stmt = stmt.where(User.role == role)
+
+        if is_active is not None:
+            stmt = stmt.where(User.is_active == is_active)
+
+        if search:
+            pattern = f"%{search}%"
+            stmt = stmt.where(
+                or_(
+                    User.full_name.ilike(pattern),
+                    User.email.ilike(pattern),
+                )
+            )
+
+        return stmt
 
     # ----------------------------------------------------------------
     # Write Operations
@@ -151,24 +268,26 @@ class UserRepository:
             The persisted `User` instance, refreshed with any
             server-generated values (id, created_at, updated_at, etc.).
 
-        Notes:
-            - TEMPORARY DEBUGGING: database operations are wrapped in a
-              try/except block that prints the exception type, message,
-              and full traceback to the terminal, rolls back the
-              session, and re-raises the original exception unchanged.
-              This block should be removed once the root cause of the
-              current registration 500 error is identified and fixed.
+        Raises:
+            Exception: Re-raises whatever the underlying database
+                operation raised (e.g. `sqlalchemy.exc.IntegrityError`
+                on a unique-constraint violation), after rolling back
+                the session and logging the failure. Callers (typically
+                `AuthService.register`) are expected to catch specific
+                exception types (e.g. `IntegrityError`) to translate
+                them into appropriate HTTP responses.
         """
         try:
             self._session.add(user)
             await self._session.commit()
             await self._session.refresh(user)
-        except Exception as exc:
+        except Exception:
             await self._session.rollback()
-            print("CREATE USER ERROR")
-            print(f"Exception type: {type(exc)}")
-            print(f"Exception message: {exc}")
-            traceback.print_exc()
+            logger.exception(
+                "Failed to create user (email=%s, phone=%s); rolled back.",
+                user.email,
+                user.phone,
+            )
             raise
         return user
 

@@ -1,57 +1,447 @@
 """
-Models package.
+Application SQLAlchemy model package.
 
-This package is the single home for every SQLAlchemy ORM model in
-the application (e.g. `User`, `Customer`, `Lead`, `Property`,
-`Booking`, `Payment`, etc. -- introduced in later phases).
+All ORM models are imported here so they are registered with the shared
+Base.metadata used by the application and Alembic.
 
-Why this file exists (even though it currently declares no models):
-  - `app.db.base.Base` is re-exported here so that every model
-    module can consistently do `from app.models import Base` instead
-    of reaching back into `app.db.base` directly, keeping model
-    imports self-contained within this package.
-  - As each model is added in a future phase, it MUST be imported
-    here so that its table is registered on `Base.metadata`. This is
-    what allows Alembic's autogenerate to discover the full schema:
-    Alembic only "sees" models that have actually been imported
-    somewhere before it inspects `Base.metadata`.
-  - Centralizing these imports in one place avoids scattered,
-    inconsistent import paths across the codebase and prevents
-    circular-import issues between model modules that reference
-    one another via relationships/foreign keys.
-
-Usage (once models exist, added in a future phase):
-
-    # app/models/__init__.py
-    from app.db.base import Base
-
-    from app.models.user import User
-    from app.models.customer import Customer
-    from app.models.lead import Lead
-    from app.models.property import Property
-    from app.models.booking import Booking
-    from app.models.payment import Payment
-
-    __all__ = [
-        "Base",
-        "User",
-        "Customer",
-        "Lead",
-        "Property",
-        "Booking",
-        "Payment",
-    ]
-
-NOTE (scope of this phase):
-    No model classes are declared or imported yet. This file only
-    establishes the package structure and re-exports `Base` so that
-    future model modules have a single, stable import target.
+Optional integrations are imported defensively where their third-party
+dependencies may not be installed in lightweight/test environments.
 """
 
 from app.db.base import Base
 
-# Public API of this package. Extended in future phases as model
-# modules are added (e.g. "User", "Customer", "Lead", ...).
+# ---------------------------------------------------------------------------
+# Core models
+# ---------------------------------------------------------------------------
+
+from app.models.user import User, UserRole
+
+from app.models.lead import (
+    Lead,
+    LeadPriority,
+    LeadSource,
+    LeadStatus,
+)
+
+from app.models.property import (
+    FurnishingType,
+    ListingType,
+    Property,
+    PropertyStatus,
+    PropertyType,
+)
+
+from app.models.customer import (
+    Customer,
+    CustomerSource,
+    CustomerStatus,
+    CustomerType,
+    Gender,
+    MaritalStatus,
+    PreferredBHK,
+    PreferredPropertyType,
+)
+
+from app.models.booking import (
+    Booking,
+    BookingPaymentMode,
+    BookingPaymentStatus,
+    BookingStatus,
+)
+
+from app.models.payment import (
+    Payment,
+    PaymentMode,
+    PaymentStatus,
+    PaymentType,
+)
+
+# ---------------------------------------------------------------------------
+# Activity / audit
+# ---------------------------------------------------------------------------
+
+from app.models.activity import (
+    Activity,
+    ActivityModule,
+    ActivityPriority,
+    ActivityStatus,
+    ActivityType,
+)
+
+from app.models.audit_log import (
+    AuditAction,
+    AuditLog,
+    AuditSeverity,
+    AuditStatus,
+)
+
+# ---------------------------------------------------------------------------
+# AI / conversation
+# ---------------------------------------------------------------------------
+
+from app.models.conversation import Conversation
+from app.models.message import Message, MessageRole
+from app.models.prompt_template import PromptCategory, PromptTemplate
+
+from app.models.knowledge_document import (
+    DocumentSourceType,
+    DocumentStatus,
+    KnowledgeDocument,
+)
+
+# Embedding depends on pgvector. Keep it optional so modules such as
+# Global Search can still import in environments where pgvector is absent.
+try:
+    from app.models.embedding import Embedding
+except (ImportError, ModuleNotFoundError):
+    Embedding = None  # type: ignore[assignment]
+
+from app.models.ai_usage import (
+    AIFeature,
+    AIUsage,
+    AIUsageStatus,
+)
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+from app.models.document import (
+    Document,
+    DocumentCategory,
+    DocumentFileType,
+    DocumentStorageProvider,
+)
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+from app.models.notification import (
+    Notification,
+    NotificationCategory,
+    NotificationChannel,
+    NotificationPriority,
+    NotificationStatus,
+    SoftDeleteMixin,
+    TimestampMixin,
+)
+
+from app.models.notification_log import (
+    NotificationEventType,
+    NotificationLog,
+)
+
+from app.models.notification_queue import (
+    NotificationQueue,
+    QueueStatus,
+)
+
+from app.models.notification_template import (
+    NotificationTemplate,
+    TemplateLocale,
+)
+
+from app.models.email_notification import (
+    EmailNotification,
+    EmailProvider,
+)
+
+from app.models.sms_notification import (
+    SMSDeliveryStatus,
+    SMSNotification,
+    SMSProvider,
+)
+
+from app.models.whatsapp_notification import (
+    WhatsAppMessageType,
+    WhatsAppNotification,
+    WhatsAppProvider,
+)
+
+from app.models.push_notification import (
+    DevicePlatform,
+    PushNotification,
+    PushProvider,
+)
+
+from app.models.in_app_notification import (
+    InAppDisplayType,
+    InAppNotification,
+)
+
+# ---------------------------------------------------------------------------
+# Integrations / webhooks
+# ---------------------------------------------------------------------------
+
+from app.models.integration import (
+    Integration,
+    IntegrationProvider,
+    IntegrationStatus,
+    IntegrationType,
+)
+
+from app.models.integration import (
+    AuthenticationType as IntegrationAuthenticationType,
+)
+
+from app.models.webhook import (
+    DeliveryStatus,
+    Webhook,
+    WebhookEvent,
+    WebhookLog,
+    WebhookStatus,
+)
+
+from app.models.webhook import (
+    AuthenticationType as WebhookAuthenticationType,
+)
+
+# ---------------------------------------------------------------------------
+# Tasks / workflows
+# ---------------------------------------------------------------------------
+
+from app.models.task import (
+    Task,
+    TaskPriority,
+    TaskStatus,
+    TaskType,
+)
+
+from app.models.workflow import (
+    ApprovalStatus,
+    Workflow,
+    WorkflowApproval,
+    WorkflowStatus,
+    WorkflowStep,
+    WorkflowStepStatus,
+)
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+from app.models.search import (
+    SearchHistory,
+    SearchModule,
+    SearchType,
+)
+
+# ---------------------------------------------------------------------------
+# Settings / monitoring
+# ---------------------------------------------------------------------------
+
+from app.models.settings import (
+    SettingCategory,
+    SettingDataType,
+    Settings,
+)
+
+from app.models.monitoring import (
+    ComponentType,
+    HealthStatus,
+    MetricType,
+    SystemHealth,
+)
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+from app.models.dashboard import (
+    BookingStatusEnum,
+    LeadStatusEnum,
+    PaymentStatusEnum,
+    PropertyStatusEnum,
+    TrendPeriod,
+)
+
+from app.models.dashboard import (
+    ActivityType as DashboardActivityType,
+)
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+from app.models.report import (
+    ExportFormat,
+    ReportBookingStatus,
+    ReportLeadSource,
+    ReportLeadStatus,
+    ReportPaymentStatus,
+    ReportPeriod,
+    ReportPropertyStatus,
+    ReportType,
+)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 __all__ = [
     "Base",
+
+    # User
+    "User",
+    "UserRole",
+
+    # Lead
+    "Lead",
+    "LeadPriority",
+    "LeadSource",
+    "LeadStatus",
+
+    # Property
+    "Property",
+    "PropertyType",
+    "PropertyStatus",
+    "ListingType",
+    "FurnishingType",
+
+    # Customer
+    "Customer",
+    "CustomerType",
+    "CustomerStatus",
+    "CustomerSource",
+    "Gender",
+    "MaritalStatus",
+    "PreferredPropertyType",
+    "PreferredBHK",
+
+    # Booking
+    "Booking",
+    "BookingStatus",
+    "BookingPaymentStatus",
+    "BookingPaymentMode",
+
+    # Payment
+    "Payment",
+    "PaymentStatus",
+    "PaymentMode",
+    "PaymentType",
+
+    # Activity
+    "Activity",
+    "ActivityType",
+    "ActivityModule",
+    "ActivityPriority",
+    "ActivityStatus",
+
+    # Audit
+    "AuditLog",
+    "AuditAction",
+    "AuditSeverity",
+    "AuditStatus",
+
+    # AI
+    "Conversation",
+    "Message",
+    "MessageRole",
+    "PromptTemplate",
+    "PromptCategory",
+    "KnowledgeDocument",
+    "DocumentSourceType",
+    "DocumentStatus",
+    "Embedding",
+    "AIUsage",
+    "AIFeature",
+    "AIUsageStatus",
+
+    # Documents
+    "Document",
+    "DocumentFileType",
+    "DocumentCategory",
+    "DocumentStorageProvider",
+
+    # Notifications
+    "Notification",
+    "NotificationChannel",
+    "NotificationPriority",
+    "NotificationStatus",
+    "NotificationCategory",
+    "TimestampMixin",
+    "SoftDeleteMixin",
+    "NotificationLog",
+    "NotificationEventType",
+    "NotificationQueue",
+    "QueueStatus",
+    "NotificationTemplate",
+    "TemplateLocale",
+    "EmailNotification",
+    "EmailProvider",
+    "SMSNotification",
+    "SMSProvider",
+    "SMSDeliveryStatus",
+    "WhatsAppNotification",
+    "WhatsAppProvider",
+    "WhatsAppMessageType",
+    "PushNotification",
+    "DevicePlatform",
+    "PushProvider",
+    "InAppNotification",
+    "InAppDisplayType",
+
+    # Integration
+    "Integration",
+    "IntegrationType",
+    "IntegrationProvider",
+    "IntegrationStatus",
+    "IntegrationAuthenticationType",
+
+    # Webhook
+    "Webhook",
+    "WebhookLog",
+    "WebhookStatus",
+    "WebhookEvent",
+    "DeliveryStatus",
+    "WebhookAuthenticationType",
+
+    # Task
+    "Task",
+    "TaskStatus",
+    "TaskPriority",
+    "TaskType",
+
+    # Workflow
+    "Workflow",
+    "WorkflowStep",
+    "WorkflowApproval",
+    "WorkflowStatus",
+    "WorkflowStepStatus",
+    "ApprovalStatus",
+
+    # Search
+    "SearchHistory",
+    "SearchModule",
+    "SearchType",
+
+    # Settings
+    "Settings",
+    "SettingCategory",
+    "SettingDataType",
+
+    # Monitoring
+    "SystemHealth",
+    "HealthStatus",
+    "ComponentType",
+    "MetricType",
+
+    # Dashboard
+    "DashboardActivityType",
+    "TrendPeriod",
+    "LeadStatusEnum",
+    "BookingStatusEnum",
+    "PaymentStatusEnum",
+    "PropertyStatusEnum",
+
+    # Reports
+    "ReportType",
+    "ReportPeriod",
+    "ExportFormat",
+    "ReportLeadSource",
+    "ReportLeadStatus",
+    "ReportBookingStatus",
+    "ReportPaymentStatus",
+    "ReportPropertyStatus",
 ]

@@ -21,10 +21,16 @@ Design Notes:
       here directly — those operations are delegated to
       `app.core.security` to keep a single source of truth for
       cryptographic behavior.
+    - Audit-relevant events (successful registration, successful login,
+      failed login attempts, token refresh) are logged at INFO/WARNING
+      level for security monitoring. Plaintext passwords and issued
+      tokens are never logged, only the associated email/user ID and
+      outcome.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid as uuid_pkg
 from typing import Optional
 
@@ -44,6 +50,8 @@ from app.core.security import (
 from app.models.user import User, UserRole
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import TokenResponse
+
+logger = logging.getLogger(__name__)
 
 
 class AuthService:
@@ -125,11 +133,15 @@ class AuthService:
             )
         except IntegrityError:
             await self._session.rollback()
+            logger.warning(
+                "Registration conflict (race condition) for email=%s", email
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A user with this email or phone number already exists.",
             )
 
+        logger.info("User registered: user_id=%s email=%s", user.id, user.email)
         return user
 
     # ----------------------------------------------------------------
@@ -187,6 +199,7 @@ class AuthService:
         """
         user = await self.authenticate_user(email=email, password=password)
         if user is None:
+            logger.warning("Failed login attempt for email=%s", email)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid email or password.",
@@ -198,6 +211,8 @@ class AuthService:
             extra_claims={"role": user.role.value},
         )
         refresh_token = create_refresh_token(subject=str(user.id))
+
+        logger.info("User logged in: user_id=%s email=%s", user.id, user.email)
 
         return TokenResponse(
             access_token=access_token,
@@ -230,6 +245,7 @@ class AuthService:
         try:
             payload = decode_token(refresh_token, expected_type=TokenType.REFRESH)
         except (JWTError, ValueError):
+            logger.warning("Rejected refresh-token attempt: invalid/expired/mistyped token.")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired refresh token.",
@@ -272,6 +288,8 @@ class AuthService:
             subject=str(user.id),
             extra_claims={"role": user.role.value},
         )
+
+        logger.info("Access token refreshed: user_id=%s", user.id)
 
         return TokenResponse(
             access_token=new_access_token,

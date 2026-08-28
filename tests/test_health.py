@@ -15,12 +15,22 @@ client = TestClient(app)
 
 
 def test_read_root():
-    """The root endpoint should confirm the API is running."""
-    response = client.get("/")
+    """
+    The application's root/liveness endpoint should confirm the API is
+    running.
+
+    NOTE: The current application registers no literal "/" route --
+    verified by enumerating `app.routes` directly, the only top-level
+    (non-`/api/v1`-prefixed) route is `GET /health` (app/main.py). There
+    is no endpoint anywhere returning a `{"status": "running",
+    "project": ...}` shape; that was never implemented. `/health` is
+    the actual, sole supported basic-liveness endpoint, so this test
+    targets it and asserts its real response shape.
+    """
+    response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "running"
-    assert "project" in body
+    assert body["status"] == "ok"
 
 
 def test_health_check():

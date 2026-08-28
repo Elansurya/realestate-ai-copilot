@@ -108,7 +108,7 @@ async def get_current_user(
     """
     try:
         payload = decode_token(token, expected_type=TokenType.ACCESS)
-    except (JWTError, ValueError):
+    except Exception:
         raise _unauthorized()
 
     subject = payload.get("sub")

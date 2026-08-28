@@ -22,6 +22,7 @@ Provides:
 import logging
 from typing import AsyncGenerator
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -118,9 +119,40 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as db:
         try:
             yield db
+        except HTTPException:
+            # Expected control flow (401/404/409/etc. raised deliberately
+            # by the service/router layers). Still roll back any partial
+            # writes so the connection is returned to the pool in a
+            # clean state, but do NOT log this as an error -- doing so
+            # would flood logs with full tracebacks for routine 4xx
+            # responses, drowning out genuine failures.
+            await db.rollback()
+            raise
         except Exception:
+            # Anything else here is unexpected (a real DB/driver error,
+            # a bug in application code, etc.) and warrants a full
+            # traceback at ERROR level for investigation.
             logger.exception("Database session error; rolling back transaction.")
             await db.rollback()
             raise
         finally:
             await db.close()
+
+
+async def dispose_engine() -> None:
+    """
+    Dispose of the module-level `AsyncEngine` and its connection pool.
+
+    Intended to be called once, during application shutdown (e.g. from
+    the FastAPI `lifespan` context manager's teardown phase), so that
+    all pooled connections are closed cleanly rather than left open
+    until the process exits. Safe to call even if the engine has not
+    been used yet.
+
+    Usage:
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            yield
+            await dispose_engine()
+    """
+    await engine.dispose()
